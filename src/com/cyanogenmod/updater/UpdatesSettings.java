@@ -10,31 +10,18 @@
 package com.cyanogenmod.updater;
 
 import android.app.ActionBar;
-import android.app.ActivityManager;
 import android.app.AlarmManager;
 import android.app.AlertDialog;
 import android.app.DownloadManager;
-import android.app.DownloadManager.Request;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
-import android.content.Context;
-import android.content.DialogInterface;
-import android.content.Intent;
-import android.content.SharedPreferences;
-import android.content.pm.PackageInfo;
-import android.content.pm.PackageManager;
+import android.content.*;
 import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.database.Cursor;
 import android.net.ConnectivityManager;
 import android.net.NetworkInfo;
-import android.net.Uri;
-import android.os.Bundle;
-import android.os.Environment;
-import android.os.Handler;
-import android.os.PowerManager;
-import android.os.storage.StorageManager;
-import android.os.storage.StorageVolume;
+import android.os.*;
 import android.preference.CheckBoxPreference;
 import android.preference.ListPreference;
 import android.preference.Preference;
@@ -43,6 +30,7 @@ import android.preference.PreferenceActivity;
 import android.preference.PreferenceCategory;
 import android.preference.PreferenceScreen;
 import android.util.Log;
+import android.view.KeyEvent;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.widget.ProgressBar;
@@ -59,14 +47,7 @@ import com.cyanogenmod.updater.tasks.UpdateCheckTask;
 import com.cyanogenmod.updater.utils.SysUtils;
 import com.cyanogenmod.updater.utils.UpdateFilter;
 
-import java.io.BufferedReader;
-import java.io.BufferedWriter;
-import java.io.File;
-import java.io.FileReader;
-import java.io.FileWriter;
-import java.io.FilenameFilter;
-import java.io.IOException;
-import java.io.OutputStream;
+import java.io.*;
 import java.text.MessageFormat;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -76,6 +57,7 @@ import java.util.List;
 public class UpdatesSettings extends PreferenceActivity implements OnPreferenceChangeListener {
     private static String TAG = "UpdatesSettings";
     private static final boolean DEBUG = false;
+    private static final boolean SCAN_EXISTING_UPDATES = false; // No historical updates should be shown
 
     private static String UPDATES_CATEGORY = "updates_category";
 
@@ -107,10 +89,63 @@ public class UpdatesSettings extends PreferenceActivity implements OnPreferenceC
 
     private Handler mUpdateHandler = new Handler();
 
+    private DownloadSupport mDownloadSupport;
+
+    /**
+     * Broadcast receiver to kick start the download progress bar if the background service
+     * automatically starts an update.
+     */
+    private final BroadcastReceiver mDownloadBroadcastReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            Log.i(TAG, "Got broadcast "+intent.getAction()+" : "+intent.getCategories());
+            if(!DownloadSupport.DOWNLOAD_STARTED_ACTION.equals(intent.getAction())) {
+                return;
+            }
+
+            UpdateInfo ui = (UpdateInfo) intent.getExtras().get(DownloadSupport.DOWNLOAD_STARTED_EXTRA_UPDATE_INFO);
+            if(ui == null) {
+                Log.i(TAG, "Bailing");
+                return;
+            }
+
+            // Start the download
+            mEnqueue = intent.getExtras().getLong(DownloadSupport.DOWNLOAD_STARTED_EXTRA_ID);
+            mFileName = ui.getFileName();
+            mDownloading = true;
+
+            // Store in shared preferences
+            mPrefs.edit().putLong(Constants.DOWNLOAD_ID, mEnqueue).apply();
+            mPrefs.edit().putString(Constants.DOWNLOAD_MD5, ui.getMD5()).apply();
+        }
+    };
+
+    /**
+     * Broadcast receiver to show the user there are no new updates
+     */
+    private final BroadcastReceiver mNoUpdatesReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            UpdatesSettings.this.runOnUiThread( new Runnable() {
+                @Override
+                public void run() {
+                    new AlertDialog.Builder(UpdatesSettings.this)
+                            .setMessage(R.string.no_updates_found)
+                            .setTitle(R.string.checking_for_updates)
+                            .setPositiveButton(R.string.ok, null)
+                            .create().show();
+                }
+            });
+        }
+    };
+
     @SuppressWarnings("deprecation")
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        // Setup the download support object
+        mDownloadSupport = new DownloadSupport(this);
 
         // Load the layouts
         addPreferencesFromResource(R.xml.main);
@@ -121,7 +156,7 @@ public class UpdatesSettings extends PreferenceActivity implements OnPreferenceC
         mPrefs = getSharedPreferences("CMUpdate", Context.MODE_MULTI_PROCESS);
         mUpdateCheck = (ListPreference) findPreference(Constants.UPDATE_CHECK_PREF);
         if (mUpdateCheck != null) {
-            int check = mPrefs.getInt(Constants.UPDATE_CHECK_PREF, Constants.UPDATE_FREQ_WEEKLY);
+            int check = mPrefs.getInt(Constants.UPDATE_CHECK_PREF, Constants.UPDATE_FREQ_AT_BOOT);
             mUpdateCheck.setValue(String.valueOf(check));
             mUpdateCheck.setSummary(mapCheckValue(check));
             mUpdateCheck.setOnPreferenceChangeListener(this);
@@ -286,15 +321,44 @@ public class UpdatesSettings extends PreferenceActivity implements OnPreferenceC
     }
 
     @Override
+    public boolean onKeyUp(int keycode, KeyEvent event) {
+        if(keycode == KeyEvent.KEYCODE_DPAD_CENTER || keycode == KeyEvent.KEYCODE_BUTTON_SELECT) {
+            int selectionPosition = getSelectedItemPosition();
+            Object selection = getPreferenceScreen().getRootAdapter().getItem(selectionPosition);
+            if(selection != null && selection instanceof UpdatePreference) {
+                UpdatePreference selectedPreference = (UpdatePreference) selection;
+                switch(selectedPreference.getStyle()) {
+                    case UpdatePreference.STYLE_NEW:
+                        startDownload(selectedPreference.getKey());
+                        break;
+                    case UpdatePreference.STYLE_DOWNLOADING:
+                        stopDownload();
+                        break;
+                    case UpdatePreference.STYLE_DOWNLOADED:
+                        startUpdate(selectedPreference.getUpdateInfo());
+                        break;
+                }
+                return true;
+            }
+
+        }
+        return super.onKeyUp(keycode, event);
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
+        registerReceiver(mDownloadBroadcastReceiver, new IntentFilter(DownloadSupport.DOWNLOAD_STARTED_ACTION));
+        registerReceiver(mNoUpdatesReceiver, new IntentFilter(UpdateCheckService.NO_UPDATES_ACTION));
         mUpdateHandler.post(updateProgress);
     }
 
     @Override
     protected void onPause() {
-            super.onPause();
-            mUpdateHandler.removeCallbacks(updateProgress);
+        super.onPause();
+        unregisterReceiver(mNoUpdatesReceiver);
+        unregisterReceiver(mDownloadBroadcastReceiver);
+        mUpdateHandler.removeCallbacks(updateProgress);
     }
 
     //*********************************************************
@@ -320,44 +384,10 @@ public class UpdatesSettings extends PreferenceActivity implements OnPreferenceC
             mDownloadingPreference = pref;
             UpdateInfo ui = mDownloadingPreference.getUpdateInfo();
             if (ui != null) {
-                PackageManager manager = this.getPackageManager();
                 mDownloadingPreference.setStyle(UpdatePreference.STYLE_DOWNLOADING);
 
-                // Create the download request and set some basic parameters
-                String fullFolderPath = Environment.getExternalStorageDirectory().getAbsolutePath()
-                        + "/" + Constants.UPDATES_FOLDER;
-                //If directory doesn't exist, create it
-                File directory = new File(fullFolderPath);
-                if (!directory.exists()) {
-                    directory.mkdirs();
-                    Log.d(TAG, "UpdateFolder created");
-                }
-
-                // Save the Changelog content to the sdcard for later use
-                writeLogFile(ui.getFileName(), ui.getChanges());
-
-                // Build the name of the file to download, adding .partial at the end.  It will get
-                // stripped off when the download completes
-                String fullFilePath = "file://" + fullFolderPath + "/" + ui.getFileName() + ".partial";
-                Request request = new Request(Uri.parse(ui.getDownloadUrl()));
-                request.addRequestHeader("Cache-Control", "no-cache");
-                try {
-                    PackageInfo pinfo = manager.getPackageInfo(this.getPackageName(), 0);
-                    request.addRequestHeader("User-Agent", pinfo.packageName + "/" + pinfo.versionName);
-                } catch (android.content.pm.PackageManager.NameNotFoundException nnfe) {
-                    // Do nothing
-                }
-                request.setTitle(getString(R.string.app_name));
-                request.setDescription(ui.getFileName());
-                request.setDestinationUri(Uri.parse(fullFilePath));
-                request.setAllowedOverRoaming(false);
-                request.setVisibleInDownloadsUi(false);
-
-                // TODO: this could/should be made configurable
-                request.setAllowedOverMetered(true);
-
                 // Start the download
-                mEnqueue = mDownloadManager.enqueue(request);
+                mEnqueue = mDownloadSupport.startDownload(ui);
                 mFileName = ui.getFileName();
                 mDownloading = true;
 
@@ -504,22 +534,25 @@ public class UpdatesSettings extends PreferenceActivity implements OnPreferenceC
 
         // Read existing Updates
         List<String> existingFilenames = null;
-        mUpdateFolder = new File(Environment.getExternalStorageDirectory() + "/cmupdater");
+        mUpdateFolder = new File(Environment.getExternalStorageDirectory().getAbsolutePath()
+                        + "/" + Constants.UPDATES_FOLDER);
         FilenameFilter f = new UpdateFilter(".zip");
         File[] files = mUpdateFolder.listFiles(f);
 
         // If Folder Exists and Updates are present(with md5files)
-        if (mUpdateFolder.exists() && mUpdateFolder.isDirectory() && files != null && files.length > 0) {
-            //To show only the Filename. Otherwise the whole Path with /sdcard/cm-updates will be shown
-            existingFilenames = new ArrayList<String>();
-            for (File file : files) {
-                if (file.isFile()) {
-                    existingFilenames.add(file.getName());
+        if(SCAN_EXISTING_UPDATES) {
+            if (mUpdateFolder.exists() && mUpdateFolder.isDirectory() && files != null && files.length > 0) {
+                //To show only the Filename. Otherwise the whole Path with /sdcard/cm-updates will be shown
+                existingFilenames = new ArrayList<String>();
+                for (File file : files) {
+                    if (file.isFile()) {
+                        existingFilenames.add(file.getName());
+                    }
                 }
+                //For sorting the Filenames, have to find a way to do natural sorting
+                existingFilenames = Collections.synchronizedList(existingFilenames);
+                Collections.sort(existingFilenames, Collections.reverseOrder());
             }
-            //For sorting the Filenames, have to find a way to do natural sorting
-            existingFilenames = Collections.synchronizedList(existingFilenames);
-            Collections.sort(existingFilenames, Collections.reverseOrder());
         }
         files = null;
 
@@ -591,17 +624,6 @@ public class UpdatesSettings extends PreferenceActivity implements OnPreferenceC
         return text.toString();
     }
 
-    private void writeLogFile(String filename, String log) {
-        File logFile = new File(mUpdateFolder + "/" + filename + ".changelog");
-        try {
-            BufferedWriter bw = new BufferedWriter(new FileWriter(logFile));
-            bw.write(log);
-            bw.close();
-        } catch (IOException e) {
-            Log.e(TAG, "File write failed: " + e.toString());
-        }
-    }
-
     private void refreshPreferences() {
         if (mUpdatesList != null) {
             // Clear the list
@@ -610,7 +632,7 @@ public class UpdatesSettings extends PreferenceActivity implements OnPreferenceC
             int style;
 
             // Convert the systemRom name to the associated filename
-            String installedZip = "cm-" + mSystemRom.toString() + ".zip";
+            String installedZip = mSystemRom.toString() + ".zip";
 
             // Add the server based updates
             // Since these will almost always be newer, they should appear at the top
@@ -811,45 +833,7 @@ public class UpdatesSettings extends PreferenceActivity implements OnPreferenceC
             builder.setMessage(dialogBody);
             builder.setPositiveButton(R.string.dialog_update, new DialogInterface.OnClickListener() {
                 public void onClick(DialogInterface dialog, int which) {
-                    /*
-                     * Should perform the following steps.
-                     * 0.- Ask the user for a confirmation (already done when we reach here)
-                     * 1.- mkdir -p /cache/recovery
-                     * 2.- echo 'boot-recovery' > /cache/recovery/command
-                     * 3.- if(mBackup) echo '--nandroid'  >> /cache/recovery/command
-                     * 4.- echo '--update_package=SDCARD:update.zip' >> /cache/recovery/command
-                     * 5.- reboot recovery
-                     */
-                    try {
-                        // Set the 'boot recovery' command
-                        Process p = Runtime.getRuntime().exec("sh");
-                        OutputStream os = p.getOutputStream();
-                        os.write("mkdir -p /cache/recovery/\n".getBytes());
-                        os.write("echo 'boot-recovery' >/cache/recovery/command\n".getBytes());
-
-                        // See if backups are enabled and add the nandroid flag
-                        /* TODO: add this back once we have a way of doing backups that is not recovery specific
-                        SharedPreferences prefs = getSharedPreferences("CMUpdate", Context.MODE_MULTI_PROCESS);
-                        if (prefs.getBoolean(Constants.BACKUP_PREF, true)) {
-                            os.write("echo '--nandroid'  >> /cache/recovery/command\n".getBytes());
-                        }
-                        */
-
-                        // Add the update folder/file name
-                        String cmd = "echo '--update_package="+getStorageMountpoint()
-                                + "/" + Constants.UPDATES_FOLDER + "/" + updateInfo.getFileName()
-                                + "' >> /cache/recovery/command\n";
-                        os.write(cmd.getBytes());
-                        os.flush();
-
-                        // Trigger the reboot
-                        PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
-                        powerManager.reboot("recovery");
-
-                    } catch (IOException e) {
-                        Log.e(TAG, "Unable to reboot into recovery mode:", e);
-                        Toast.makeText(UpdatesSettings.this, R.string.apply_unable_to_reboot_toast, Toast.LENGTH_SHORT).show();
-                    }
+                    new Thread(new CopyAndStartUpdate(updateInfo)).start();
                 }
             });
             builder.setNegativeButton(R.string.dialog_cancel, new DialogInterface.OnClickListener() {
@@ -862,39 +846,43 @@ public class UpdatesSettings extends PreferenceActivity implements OnPreferenceC
         dialog.show();
     }
 
-    private String getStorageMountpoint() {
-        StorageManager sm = (StorageManager) getSystemService(Context.STORAGE_SERVICE);
-        StorageVolume[] volumes = sm.getVolumeList();
-        String primaryStoragePath = Environment.getExternalStorageDirectory().getAbsolutePath();
-        boolean alternateIsInternal = getResources().getBoolean(R.bool.alternateIsInternal);
-
-        if (volumes.length <= 1) {
-            // single storage, assume only /sdcard exists
-            return "/sdcard";
-        }
-
-        for (int i = 0; i < volumes.length; i++) {
-            StorageVolume v = volumes[i];
-            if (v.getPath().equals(primaryStoragePath)) {
-                /* This is the primary storage, where we stored the update file
-                 *
-                 * For CM10, a non-removable storage (partition or FUSE)
-                 * will always be primary. But we have older recoveries out there 
-                 * in which /sdcard is the microSD, and the internal partition is 
-                 * mounted at /emmc.
-                 *
-                 * At buildtime, we try to automagically guess from recovery.fstab
-                 * what's the recovery configuration for this device. If "/emmc"
-                 * exists, and the primary isn't removable, we assume it will be 
-                 * mounted there.
-                 */ 
-                if (!v.isRemovable() && alternateIsInternal) {
-                    return "/emmc";
-                }
-            };
-        }
-        // Not found, assume non-alternate
-        return "/sdcard";
+    private String getStorageMountpoint() {        
+        return Environment.getExternalStorageDirectory().getAbsolutePath();
     }
 
+    private class CopyAndStartUpdate implements Runnable {
+        private UpdateInfo updateInfo;
+
+        CopyAndStartUpdate(UpdateInfo updateInfo) {
+            this.updateInfo = updateInfo;
+        }
+
+        public void run() {
+            try {
+                final File cachedUpdateFile = new File(Environment.getExternalStorageDirectory().getAbsolutePath()
+                        + "/" + Constants.UPDATES_FOLDER, updateInfo.getFileName());
+                final File updateFile = new File("/cache/update.zip");
+                updateFile.delete();		// Ensure we don't have an old version hanging around.    
+                updateFile.createNewFile();            
+                FileInputStream fis = new FileInputStream(cachedUpdateFile);
+                FileOutputStream fos = new FileOutputStream(updateFile);
+                try {
+                	byte[] buffer = new byte[1024];
+                	int read;
+                	while((read = fis.read(buffer)) != -1) {
+                		fos.write(buffer, 0, read);
+                	}
+                	fos.flush();
+                } finally {
+                    fos.close();
+                    fis.close();
+                }
+                cachedUpdateFile.delete();
+                RecoverySystem.installPackage(UpdatesSettings.this, updateFile);
+            } catch (IOException e) {
+                Log.e(TAG, "Unable to reboot into recovery mode:", e);
+                Toast.makeText(UpdatesSettings.this, R.string.apply_unable_to_reboot_toast, Toast.LENGTH_SHORT).show();
+            }
+        }
+    }
 }

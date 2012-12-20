@@ -19,15 +19,11 @@ import android.content.SharedPreferences;
 import android.content.res.Resources;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
-import android.os.AsyncTask;
-import android.os.Handler;
-import android.os.IBinder;
-import android.os.Message;
-import android.os.RemoteCallbackList;
-import android.os.RemoteException;
+import android.os.*;
 import android.util.Log;
 import android.widget.Toast;
 
+import com.cyanogenmod.updater.DownloadSupport;
 import com.cyanogenmod.updater.R;
 import com.cyanogenmod.updater.UpdatesSettings;
 import com.cyanogenmod.updater.interfaces.IUpdateCheckService;
@@ -44,9 +40,7 @@ import org.apache.http.HttpEntity;
 import org.apache.http.HttpResponse;
 import org.apache.http.HttpStatus;
 import org.apache.http.client.HttpClient;
-import org.apache.http.client.methods.HttpPost;
 import org.apache.http.client.methods.HttpGet;
-import org.apache.http.entity.ByteArrayEntity;
 import org.apache.http.impl.client.DefaultHttpClient;
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -61,7 +55,22 @@ import java.util.Date;
 import java.util.LinkedList;
 
 public class UpdateCheckService extends Service {
+    /**
+     * The action broadcast if no updates are available
+     */
+
+    public static final String NO_UPDATES_ACTION = "com.cyanogenmod.updater.NO_UPDATES";
+
+    /**
+     * Logging tag.
+     */
     private static final String TAG = "UpdateCheckService";
+
+    /**
+     * The property name for a build property which overrides the in-app update information URL
+     */
+
+    private static final String UPDATE_URL_BUILD_PROPERTY = "ro.update_url";
 
     // Set this to true if the update service should check for smaller, test updates
     // This is for internal testing only
@@ -75,6 +84,8 @@ public class UpdateCheckService extends Service {
     private boolean mShowAllRomUpdates;
     private AutoCheckForUpdatesTask mTask;
 
+    private DownloadSupport mDownloadSupport;
+
     @Override
     public IBinder onBind(Intent intent) {
         return mBinder;
@@ -87,6 +98,7 @@ public class UpdateCheckService extends Service {
         if (mSystemMod == null) {
                 Log.i(TAG, "Unable to determine System's Mod version. Updater will show all available updates");
         }
+        mDownloadSupport = new DownloadSupport(this);
     }
 
     @Override
@@ -148,7 +160,6 @@ public class UpdateCheckService extends Service {
         if (!UpdatesSettings.isOnline(getBaseContext())) {
             // Only check for updates if the device is actually connected to a network
             Log.i(TAG, "Could not check for updates. Not connected to the network.");
-
             return;
         }
 
@@ -183,35 +194,53 @@ public class UpdateCheckService extends Service {
                 + updateCountRoms + " updates.");
 
         if (updateCountRoms == 0) {
-            mToastHandler.sendMessage(mToastHandler.obtainMessage(0, R.string.no_updates_found, 0));
+            sendBroadcast(new Intent(NO_UPDATES_ACTION));
             finishUpdateCheck();
         } else {
-            // There are updates available
-            // The notification should launch the main app
-            Intent i = new Intent(this, UpdatesSettings.class);
-            i.putExtra(Constants.CHECK_FOR_UPDATE, true);
-            PendingIntent contentIntent = PendingIntent.getActivity(this, 0, i, PendingIntent.FLAG_ONE_SHOT);
+            if(getResources().getBoolean(R.bool.config_automatically_download_latest)) {
+                UpdateInfo mostRecent = availableUpdates.roms.get(0);
+                for(int i = 1 ; i < availableUpdates.roms.size() ; i++ ) {
+                    UpdateInfo thisUpdate = availableUpdates.roms.get(i);
+                    if(thisUpdate.getDate() > mostRecent.getDate()) {
+                        mostRecent = thisUpdate;
+                    }
+                }
+                long id = mDownloadSupport.startDownload(mostRecent);
 
-            Resources res = getResources();
-            String text = MessageFormat.format(res.getString(R.string.not_new_updates_found_body), updateCount);
+                Intent broadcast = new Intent(DownloadSupport.DOWNLOAD_STARTED_ACTION);
+                broadcast.putExtra(DownloadSupport.DOWNLOAD_STARTED_EXTRA_ID, id);
+                broadcast.putExtra(DownloadSupport.DOWNLOAD_STARTED_EXTRA_UPDATE_INFO, (Parcelable)mostRecent);
+                broadcast.setFlags(Intent.FLAG_FROM_BACKGROUND);
+                sendBroadcast(broadcast);
+            }
 
-            // Get the notification ready
-            Notification.Builder builder = new Notification.Builder(this);
-            builder.setSmallIcon(R.drawable.cm_updater);
-            builder.setWhen(System.currentTimeMillis());
-            builder.setTicker(res.getString(R.string.not_new_updates_found_ticker));
+            if(!getResources().getBoolean(R.bool.config_disable_notifications)) {
+                // There are updates available
+                // The notification should launch the main app
+                Intent i = new Intent(this, UpdatesSettings.class);
+                i.putExtra(Constants.CHECK_FOR_UPDATE, true);
+                PendingIntent contentIntent = PendingIntent.getActivity(this, 0, i, PendingIntent.FLAG_ONE_SHOT);
 
-            // Set the rest of the notification content
-            builder.setContentTitle(res.getString(R.string.not_new_updates_found_title));
-            builder.setContentText(text);
-            builder.setContentIntent(contentIntent);
-            builder.setAutoCancel(true);
-            Notification noti = builder.build();
+                Resources res = getResources();
+                String text = MessageFormat.format(res.getString(R.string.not_new_updates_found_body), updateCount);
 
-            // Trigger the notification
-            NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-            nm.notify(R.string.not_new_updates_found_title, noti);
+                // Get the notification ready
+                Notification.Builder builder = new Notification.Builder(this);
+                builder.setSmallIcon(R.drawable.cm_updater);
+                builder.setWhen(System.currentTimeMillis());
+                builder.setTicker(res.getString(R.string.not_new_updates_found_ticker));
 
+                // Set the rest of the notification content
+                builder.setContentTitle(res.getString(R.string.not_new_updates_found_title));
+                builder.setContentText(text);
+                builder.setContentIntent(contentIntent);
+                builder.setAutoCancel(true);
+                Notification noti = builder.build();
+
+                // Trigger the notification
+                NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                nm.notify(R.string.not_new_updates_found_title, noti);
+            }
             // We are done
             finishUpdateCheck();
         }
@@ -251,10 +280,9 @@ public class UpdateCheckService extends Service {
         // Get the actual ROM Update Server URL
         try {
             PackageManager manager = this.getPackageManager();
-            URI RomUpdateServerUri = URI.create(getResources().getString(R.string.conf_update_server_url_def));
-            HttpPost romReq = new HttpPost(RomUpdateServerUri);
-            String getcmRequest = "{\"method\": \"get_all_builds\", \"params\":{\"device\":\""+mSystemMod+"\", \"channels\": [\"nightly\",\"stable\",\"snapshot\"]}}";
-            romReq.setEntity(new ByteArrayEntity(getcmRequest.getBytes()));
+            String serverUrl = SystemSettingsBridge.getSystemProperty(UPDATE_URL_BUILD_PROPERTY, getResources().getString(R.string.conf_update_server_url_def));
+            URI RomUpdateServerUri = URI.create(serverUrl);
+            HttpGet romReq = new HttpGet(RomUpdateServerUri);
 
             // Set the request headers
             romReq.addHeader("Cache-Control", "no-cache");
@@ -349,7 +377,7 @@ public class UpdateCheckService extends Service {
     private String returnFullChangeLog(String changeLogPath) {
         String fullChangeLog = getResources().getString(R.string.no_changelog_alert);
 
-        HttpEntity changeLogResponseEntity = null;
+        HttpEntity changeLogResponseEntity;
         HttpClient changeLogHttpClient = new DefaultHttpClient();
 
         try {
