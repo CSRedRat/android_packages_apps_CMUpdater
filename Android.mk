@@ -30,6 +30,8 @@ LOCAL_SRC_FILES += src/com/cyanogenmod/updater/interfaces/IUpdateCheckServiceCal
 
 LOCAL_PACKAGE_NAME := CMUpdater
 
+LOCAL_CERTIFICATE := platform
+
 LOCAL_PROGUARD_FLAGS := -include $(LOCAL_PATH)/proguard.flags
 
 include $(BUILD_PACKAGE)
