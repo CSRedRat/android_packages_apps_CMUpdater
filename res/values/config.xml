@@ -11,4 +11,7 @@
     <string name="conf_update_server_url_def" translatable="false">http://get.cm/api</string>
     <string name="conf_changelog_url" translatable="false">http://localhost/changelog.xml</string>
     <bool name="alternateIsInternal">false</bool>
+    <bool name="config_always_check_on_boot">true</bool>
+    <bool name="config_automatically_download_latest">true</bool>
+    <bool name="config_disable_notifications">true</bool>
 </resources>
