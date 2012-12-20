@@ -18,6 +18,7 @@ import android.content.SharedPreferences;
 import android.net.ConnectivityManager;
 import android.util.Log;
 
+import com.cyanogenmod.updater.R;
 import com.cyanogenmod.updater.misc.Constants;
 import com.cyanogenmod.updater.service.UpdateCheckService;
 
@@ -30,7 +31,7 @@ public class UpdateCheckReceiver extends BroadcastReceiver {
     public void onReceive(Context context, Intent intent) {
         // Load the required settings from preferences
         SharedPreferences prefs = context.getSharedPreferences("CMUpdate", Context.MODE_MULTI_PROCESS);
-        int updateFrequency = prefs.getInt(Constants.UPDATE_CHECK_PREF, Constants.UPDATE_FREQ_WEEKLY);
+        int updateFrequency = prefs.getInt(Constants.UPDATE_CHECK_PREF, Constants.UPDATE_FREQ_AT_BOOT);
 
         // Check if we are set to manual updates and don't do anything
         if (updateFrequency == Constants.UPDATE_FREQ_NONE) {
@@ -52,7 +53,11 @@ public class UpdateCheckReceiver extends BroadcastReceiver {
         }
 
         // Handle the actual update check based on the defined frequency
-        if (updateFrequency == Constants.UPDATE_FREQ_AT_BOOT) {
+        boolean performBootCheck = context.getResources().getBoolean(R.bool.config_always_check_on_boot);
+        if(!performBootCheck) {
+            performBootCheck = (updateFrequency == Constants.UPDATE_FREQ_AT_BOOT);
+        }
+        if (performBootCheck) {
             boolean bootCheckCompleted = prefs.getBoolean(Constants.BOOT_CHECK_COMPLETED, false);
             if (!bootCheckCompleted) {
                 Log.i(TAG, "Start an on-boot check");
