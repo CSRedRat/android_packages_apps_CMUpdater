@@ -207,6 +207,9 @@ public class UpdateCheckService extends Service {
                 }
                 long id = mDownloadSupport.startDownload(mostRecent);
 
+                prefs.edit().putLong(Constants.DOWNLOAD_ID, id).apply();
+                prefs.edit().putString(Constants.DOWNLOAD_MD5, mostRecent.getMD5()).apply();
+
                 Intent broadcast = new Intent(DownloadSupport.DOWNLOAD_STARTED_ACTION);
                 broadcast.putExtra(DownloadSupport.DOWNLOAD_STARTED_EXTRA_ID, id);
                 broadcast.putExtra(DownloadSupport.DOWNLOAD_STARTED_EXTRA_UPDATE_INFO, (Parcelable)mostRecent);

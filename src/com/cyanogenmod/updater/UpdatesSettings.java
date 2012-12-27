@@ -57,7 +57,6 @@ import java.util.List;
 public class UpdatesSettings extends PreferenceActivity implements OnPreferenceChangeListener {
     private static String TAG = "UpdatesSettings";
     private static final boolean DEBUG = false;
-    private static final boolean SCAN_EXISTING_UPDATES = false; // No historical updates should be shown
 
     private static String UPDATES_CATEGORY = "updates_category";
 
@@ -540,19 +539,30 @@ public class UpdatesSettings extends PreferenceActivity implements OnPreferenceC
         File[] files = mUpdateFolder.listFiles(f);
 
         // If Folder Exists and Updates are present(with md5files)
-        if(SCAN_EXISTING_UPDATES) {
-            if (mUpdateFolder.exists() && mUpdateFolder.isDirectory() && files != null && files.length > 0) {
-                //To show only the Filename. Otherwise the whole Path with /sdcard/cm-updates will be shown
-                existingFilenames = new ArrayList<String>();
-                for (File file : files) {
-                    if (file.isFile()) {
+        if (mUpdateFolder.exists() && mUpdateFolder.isDirectory() && files != null && files.length > 0) {
+            mSystemRom = SysUtils.getSystemProperty(Customization.SYS_PROP_MOD_VERSION);
+            boolean deleteOld = getResources().getBoolean(R.bool.config_delete_old);
+
+            existingFilenames = new ArrayList<String>();
+            for (File file : files) {
+                if (file.isFile()) {
+                    String filename = file.getName();
+                    String versionString = filename;
+                    int prefixDash = filename.indexOf('-');
+                    if(prefixDash != -1) {
+                        versionString = filename.substring(prefixDash+1,filename.length());
+                    }
+
+                    if(deleteOld && SysUtils.compareVersionNumbers(versionString, mSystemRom) <= 0) {
+                        deleteUpdate(filename);
+                    } else {
                         existingFilenames.add(file.getName());
                     }
                 }
-                //For sorting the Filenames, have to find a way to do natural sorting
-                existingFilenames = Collections.synchronizedList(existingFilenames);
-                Collections.sort(existingFilenames, Collections.reverseOrder());
             }
+            //For sorting the Filenames, have to find a way to do natural sorting
+            existingFilenames = Collections.synchronizedList(existingFilenames);
+            Collections.sort(existingFilenames, Collections.reverseOrder());
         }
         files = null;
 

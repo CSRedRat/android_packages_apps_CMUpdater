@@ -14,4 +14,5 @@
     <bool name="config_always_check_on_boot">true</bool>
     <bool name="config_automatically_download_latest">true</bool>
     <bool name="config_disable_notifications">true</bool>
+    <bool name="config_delete_old">true</bool>
 </resources>

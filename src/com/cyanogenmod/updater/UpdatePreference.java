@@ -262,5 +262,4 @@ public class UpdatePreference extends Preference implements OnClickListener, OnL
                 break;
         }
     }
-
 }

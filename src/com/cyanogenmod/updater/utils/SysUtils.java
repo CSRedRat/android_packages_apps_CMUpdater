@@ -57,4 +57,53 @@ public class SysUtils {
         }
         return line;
     }
+
+    /**
+     * Compare two version numbers
+     *
+     * @return <0 if first < second, 0 if first == second, >0 if first > second
+     */
+
+    public static int compareVersionNumbers(String first, String second) {
+        int dash = first.indexOf('-');
+        if(dash != -1) {
+            first = first.substring(0, dash);
+        }
+
+        dash = second.indexOf('-');
+        if(dash != -1) {
+            second = second.substring(0, dash);
+        }
+
+        int currentIdx[] = {0,0};
+        int newIdx[] = new int[2];
+
+        for(int i = 0 ; i < 3 ; i++) {
+            newIdx[0] = first.indexOf('.', currentIdx[0]);
+            newIdx[1] = second.indexOf('.', currentIdx[1]);
+            if(newIdx[0] >= 0 && newIdx[1] == -1) {
+                return Integer.MAX_VALUE;
+            }
+            if(newIdx[0] == -1 && newIdx[1] >= 0) {
+                return Integer.MIN_VALUE;
+            }
+            if(newIdx[0] == -1 && newIdx[1] == -1) {
+                newIdx[0] = first.length();
+                newIdx[1] = second.length();
+            }
+
+            int firstValue = Integer.parseInt(first.substring(currentIdx[0], newIdx[0]));
+            int secondValue = Integer.parseInt(second.substring(currentIdx[1], newIdx[1]));
+
+            if(firstValue != secondValue) {
+                return firstValue - secondValue;
+            }
+
+            currentIdx[0] = newIdx[0]+1;
+            currentIdx[1] = newIdx[1]+1;
+        }
+
+        return 0;
+    }
+
 }
